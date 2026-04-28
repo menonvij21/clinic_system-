@@ -1,3 +1,9 @@
+from fastapi import FastAPI
+from database import conn, cursor
+
+app = FastAPI()
+
+# ---------- BASIC ROUTES ----------
 @app.get("/")
 def home():
     return {"status": "running"}
@@ -6,17 +12,13 @@ def home():
 def test():
     return {"message": "API working"}
 
-from fastapi import FastAPI
-from database import conn, cursor
-
-# 🔥 THIS LINE WAS MISSING
-app = FastAPI()
-
+# ---------- MEMORY ----------
 sessions = {}
 
 def think(message: str, memory: dict):
     return "Got it."
 
+# ---------- CHAT ----------
 @app.post("/chat")
 async def chat(data: dict):
     message = data.get("message", "")
@@ -28,7 +30,6 @@ async def chat(data: dict):
     memory = sessions[call_id]
     response = think(message, memory)
 
-    # Save call log
     cursor.execute(
         "INSERT INTO calls (id, user_input, agent_response) VALUES (?, ?, ?)",
         (call_id, message, response)
@@ -37,7 +38,7 @@ async def chat(data: dict):
 
     return {"response": response}
 
-
+# ---------- BOOK ----------
 @app.post("/book")
 async def book(data: dict):
     name = data.get("name")
@@ -45,7 +46,6 @@ async def book(data: dict):
     date = data.get("date")
     time = data.get("time")
 
-    # Check duplicate booking
     cursor.execute(
         "SELECT * FROM bookings WHERE doctor=? AND date=? AND time=?",
         (doctor, date, time)
