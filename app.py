@@ -8,7 +8,6 @@ app = FastAPI()
 conn = sqlite3.connect("clinic.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Create tables if not exist
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS bookings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +35,7 @@ conn.commit()
 def root():
     return {"status": "running"}
 
-# ---------------- CHAT (FOR LOGGING) ----------------
+# ---------------- CHAT (LOGGING) ----------------
 sessions = {}
 
 def think(message: str, memory: dict):
@@ -50,8 +49,7 @@ async def chat(data: dict):
     if call_id not in sessions:
         sessions[call_id] = {}
 
-    memory = sessions[call_id]
-    response = think(message, memory)
+    response = think(message, sessions[call_id])
 
     cursor.execute(
         "INSERT INTO calls (id, user_input, agent_response, timestamp) VALUES (?, ?, ?, ?)",
@@ -66,14 +64,22 @@ async def chat(data: dict):
 async def book(request: Request):
     data = await request.json()
 
-    print("🔥 RECEIVED DATA:", data)  # Debug
+    print("🔥 RAW DATA:", data)
+
+    # Handle Retell formats
+    if isinstance(data, dict):
+        if "args" in data:
+            data = data["args"]
+        elif "arguments" in data:
+            data = data["arguments"]
 
     name = data.get("name")
     doctor = data.get("doctor")
     date = data.get("date")
     time = data.get("time")
 
-    # Validate input
+    print("✅ PARSED:", name, doctor, date, time)
+
     if not all([name, doctor, date, time]):
         return {
             "status": "error",
@@ -81,7 +87,7 @@ async def book(request: Request):
             "received": data
         }
 
-    # Check duplicate booking
+    # Prevent duplicate booking
     cursor.execute(
         "SELECT * FROM bookings WHERE doctor=? AND date=? AND time=?",
         (doctor, date, time)
@@ -105,7 +111,9 @@ async def book(request: Request):
 # ---------------- GET BOOKINGS ----------------
 @app.get("/bookings")
 def get_bookings():
-    cursor.execute("SELECT name, doctor, date, time, timestamp FROM bookings ORDER BY id DESC")
+    cursor.execute(
+        "SELECT name, doctor, date, time, timestamp FROM bookings ORDER BY id DESC"
+    )
     rows = cursor.fetchall()
 
     return {
@@ -124,7 +132,9 @@ def get_bookings():
 # ---------------- GET CALL LOGS ----------------
 @app.get("/calls")
 def get_calls():
-    cursor.execute("SELECT id, user_input, agent_response, timestamp FROM calls ORDER BY timestamp DESC")
+    cursor.execute(
+        "SELECT id, user_input, agent_response, timestamp FROM calls ORDER BY timestamp DESC"
+    )
     rows = cursor.fetchall()
 
     return {
