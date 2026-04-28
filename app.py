@@ -12,6 +12,10 @@ def home():
 def test():
     return {"message": "API working"}
 
+@app.get("/chat")
+def chat_test():
+    return {"status": "ok"}
+
 # ---------- MEMORY ----------
 sessions = {}
 
