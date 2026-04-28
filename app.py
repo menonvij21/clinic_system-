@@ -1,3 +1,11 @@
+@app.get("/")
+def home():
+    return {"status": "running"}
+
+@app.get("/test")
+def test():
+    return {"message": "API working"}
+
 from fastapi import FastAPI
 from database import conn, cursor
 
