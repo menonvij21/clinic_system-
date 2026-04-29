@@ -1,18 +1,13 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 import sqlite3
-from datetime import datetime, timedelta
-import re
+from datetime import datetime
 
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("clinic.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Create tables if not exist
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS bookings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,109 +32,7 @@ CREATE TABLE IF NOT EXISTS calls (
 )
 """)
 
-# 🔥 AUTO FIX OLD DATABASE (VERY IMPORTANT)
-def safe_add_column(table, column, col_type):
-    try:
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-    except:
-        pass
-
-safe_add_column("bookings", "status", "TEXT")
-safe_add_column("bookings", "timestamp", "TEXT")
-
-safe_add_column("calls", "transcript", "TEXT")
-safe_add_column("calls", "duration_seconds", "INTEGER")
-safe_add_column("calls", "outcome", "TEXT")
-
 conn.commit()
-
-# ---------------- CLINIC RULES ----------------
-CLINIC_START = 9
-CLINIC_END = 20
-LUNCH_START = 13
-LUNCH_END = 14
-
-# ---------------- DATE PARSER ----------------
-def normalize_date(text):
-    if not text:
-        return None
-    t = text.lower().strip()
-    today = datetime.now()
-
-    if "aaj" in t or "today" in t:
-        return today
-    if "kal" in t or "tomorrow" in t:
-        return today + timedelta(days=1)
-    if "parso" in t:
-        return today + timedelta(days=2)
-
-    m = re.search(r'(\d{1,2})', t)
-    if m:
-        day = int(m.group(1))
-        try:
-            return today.replace(day=day)
-        except:
-            pass
-
-    try:
-        return datetime.strptime(t, "%Y-%m-%d")
-    except:
-        return None
-
-# ---------------- TIME PARSER ----------------
-def normalize_time(text):
-    if not text:
-        return None
-    t = text.lower().replace(".", "").strip()
-
-    m = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?', t)
-    if not m:
-        return None
-
-    h = int(m.group(1))
-    p = m.group(3)
-
-    if p == "pm" and h != 12:
-        h += 12
-    if p == "am" and h == 12:
-        h = 0
-
-    return h
-
-# ---------------- VALIDATION ----------------
-def validate_slot(date_obj, hour):
-    if date_obj.weekday() == 6:
-        return False, "Clinic closed on Sunday"
-    if hour < CLINIC_START or hour >= CLINIC_END:
-        return False, "Clinic hours 9 AM – 8 PM"
-    if LUNCH_START <= hour < LUNCH_END:
-        return False, "Lunch break 1–2 PM"
-    return True, "ok"
-
-def is_available(doctor, date_obj, hour):
-    cursor.execute(
-        "SELECT * FROM bookings WHERE doctor=? AND date=? AND time=?",
-        (doctor, date_obj.strftime("%Y-%m-%d"), f"{hour:02d}:00")
-    )
-    return cursor.fetchone() is None
-
-def next_available(doctor, date_obj):
-    for h in range(CLINIC_START, CLINIC_END):
-        if LUNCH_START <= h < LUNCH_END:
-            continue
-        if is_available(doctor, date_obj, h):
-            return h
-    return None
-
-# ---------------- ROOT ----------------
-@app.get("/")
-def root():
-    return {"status": "running"}
-
-# ---------------- DASHBOARD ----------------
-@app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
 
 # ---------------- CHAT ----------------
 sessions = {}
@@ -150,10 +43,17 @@ async def chat(data: dict):
     call_id = data.get("call_id", "default")
 
     memory = sessions.setdefault(call_id, {"history": ""})
+
     response = "Got it."
 
-    transcript = memory["history"] + f"\nUser: {message}\nAI: {response}"
-    memory["history"] = transcript
+    # CLEAN TRANSCRIPT
+    memory["history"] += f"\nUser: {message}\nAI: {response}"
+
+    # LIMIT SIZE
+    if len(memory["history"]) > 1000:
+        memory["history"] = memory["history"][-1000:]
+
+    transcript = memory["history"]
 
     cursor.execute(
         "INSERT INTO calls VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -173,40 +73,22 @@ async def chat(data: dict):
 
 # ---------------- BOOK ----------------
 @app.post("/book")
-async def book(request: Request):
-    data = await request.json()
-
+async def book(data: dict):
     if "args" in data:
         data = data["args"]
-    elif "arguments" in data:
-        data = data["arguments"]
 
     name = data.get("name")
     doctor = data.get("doctor")
-    date_obj = normalize_date(data.get("date"))
-    hour = normalize_time(data.get("time"))
-
-    if not all([name, doctor, date_obj, hour is not None]):
-        return {"status": "error", "message": "Invalid input"}
-
-    valid, msg = validate_slot(date_obj, hour)
-    if not valid:
-        return {"status": "error", "message": msg}
-
-    if not is_available(doctor, date_obj, hour):
-        nxt = next_available(doctor, date_obj)
-        return {
-            "status": "unavailable",
-            "message": f"Next available {nxt}:00" if nxt else "No slots available"
-        }
+    date = data.get("date")
+    time = data.get("time")
 
     cursor.execute(
         "INSERT INTO bookings VALUES (NULL, ?, ?, ?, ?, ?, ?)",
         (
             name,
             doctor,
-            date_obj.strftime("%Y-%m-%d"),
-            f"{hour:02d}:00",
+            date,
+            time,
             "confirmed",
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
@@ -215,22 +97,22 @@ async def book(request: Request):
 
     return {"status": "confirmed"}
 
-# ---------------- API ----------------
+# ---------------- API: STATS ----------------
 @app.get("/api/stats")
 def stats():
     cursor.execute("SELECT COUNT(*) FROM bookings")
-    b = cursor.fetchone()[0]
+    bookings = cursor.fetchone()[0]
 
     cursor.execute("SELECT COUNT(*) FROM calls")
-    c = cursor.fetchone()[0]
+    calls = cursor.fetchone()[0]
 
     return {
-        "total_bookings": b,
-        "total_calls": c,
-        "bookings_today": b,
-        "avg_call_duration_seconds": 60
+        "total_bookings": bookings,
+        "total_calls": calls,
+        "bookings_today": bookings
     }
 
+# ---------------- API: BOOKINGS ----------------
 @app.get("/api/bookings")
 def get_bookings():
     cursor.execute("SELECT id, name, doctor, date, time, status FROM bookings ORDER BY id DESC")
@@ -244,12 +126,13 @@ def get_bookings():
                 "doctor_name": r[2],
                 "appointment_date": r[3],
                 "appointment_time": r[4],
-                "status": r[5]
+                "status": r[5] if r[5] else "confirmed"
             }
             for r in rows
         ]
     }
 
+# ---------------- API: CALL LOGS ----------------
 @app.get("/api/call-logs")
 def get_calls():
     cursor.execute("SELECT id, transcript, timestamp FROM calls ORDER BY timestamp DESC")
@@ -267,3 +150,7 @@ def get_calls():
             for r in rows
         ]
     }
+
+@app.get("/")
+def root():
+    return {"status": "running"}
