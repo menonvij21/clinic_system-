@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -30,10 +30,53 @@ CREATE TABLE IF NOT EXISTS calls (
 
 conn.commit()
 
+# ---------------- HELPERS ----------------
+def normalize_date(date_str: str):
+    if not date_str:
+        return None
+
+    s = date_str.lower().strip()
+
+    if "aaj" in s or "today" in s:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    if "kal" in s or "tomorrow" in s:
+        return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # try parsing common formats
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except:
+            pass
+
+    return s  # fallback
+
+
+def normalize_time(time_str: str):
+    if not time_str:
+        return None
+
+    s = time_str.strip().lower().replace(".", "")
+
+    try:
+        return datetime.strptime(s, "%I %p").strftime("%H:%M")
+    except:
+        pass
+
+    try:
+        return datetime.strptime(s, "%I:%M %p").strftime("%H:%M")
+    except:
+        pass
+
+    return time_str  # fallback
+
+
 # ---------------- ROOT ----------------
 @app.get("/")
 def root():
     return {"status": "running"}
+
 
 # ---------------- CHAT (LOGGING) ----------------
 sessions = {}
@@ -59,6 +102,7 @@ async def chat(data: dict):
 
     return {"response": response}
 
+
 # ---------------- BOOK APPOINTMENT ----------------
 @app.post("/book")
 async def book(request: Request):
@@ -75,19 +119,19 @@ async def book(request: Request):
 
     name = data.get("name")
     doctor = data.get("doctor")
-    date = data.get("date")
-    time = data.get("time")
+    date = normalize_date(data.get("date"))
+    time = normalize_time(data.get("time"))
 
     print("✅ PARSED:", name, doctor, date, time)
 
     if not all([name, doctor, date, time]):
         return {
             "status": "error",
-            "message": "Missing fields",
+            "message": "Missing or invalid fields",
             "received": data
         }
 
-    # Prevent duplicate booking
+    # Check duplicate booking
     cursor.execute(
         "SELECT * FROM bookings WHERE doctor=? AND date=? AND time=?",
         (doctor, date, time)
@@ -107,6 +151,7 @@ async def book(request: Request):
     conn.commit()
 
     return {"status": "confirmed"}
+
 
 # ---------------- GET BOOKINGS ----------------
 @app.get("/bookings")
@@ -129,6 +174,7 @@ def get_bookings():
         ]
     }
 
+
 # ---------------- GET CALL LOGS ----------------
 @app.get("/calls")
 def get_calls():
@@ -146,5 +192,7 @@ def get_calls():
                 "timestamp": r[3]
             }
             for r in rows
+        ]
+    }
         ]
     }
