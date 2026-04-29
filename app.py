@@ -12,6 +12,7 @@ templates = Jinja2Templates(directory="templates")
 conn = sqlite3.connect("clinic.db", check_same_thread=False)
 cursor = conn.cursor()
 
+# Create tables if not exist
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS bookings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +37,20 @@ CREATE TABLE IF NOT EXISTS calls (
 )
 """)
 
+# 🔥 AUTO FIX OLD DATABASE (VERY IMPORTANT)
+def safe_add_column(table, column, col_type):
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except:
+        pass
+
+safe_add_column("bookings", "status", "TEXT")
+safe_add_column("bookings", "timestamp", "TEXT")
+
+safe_add_column("calls", "transcript", "TEXT")
+safe_add_column("calls", "duration_seconds", "INTEGER")
+safe_add_column("calls", "outcome", "TEXT")
+
 conn.commit()
 
 # ---------------- CLINIC RULES ----------------
@@ -44,7 +59,7 @@ CLINIC_END = 20
 LUNCH_START = 13
 LUNCH_END = 14
 
-# ---------------- HELPERS ----------------
+# ---------------- DATE PARSER ----------------
 def normalize_date(text):
     if not text:
         return None
@@ -58,7 +73,6 @@ def normalize_date(text):
     if "parso" in t:
         return today + timedelta(days=2)
 
-    # "3 tarikh"
     m = re.search(r'(\d{1,2})', t)
     if m:
         day = int(m.group(1))
@@ -72,6 +86,7 @@ def normalize_date(text):
     except:
         return None
 
+# ---------------- TIME PARSER ----------------
 def normalize_time(text):
     if not text:
         return None
@@ -91,11 +106,12 @@ def normalize_time(text):
 
     return h
 
+# ---------------- VALIDATION ----------------
 def validate_slot(date_obj, hour):
     if date_obj.weekday() == 6:
         return False, "Clinic closed on Sunday"
     if hour < CLINIC_START or hour >= CLINIC_END:
-        return False, "Clinic hours are 9 AM to 8 PM"
+        return False, "Clinic hours 9 AM – 8 PM"
     if LUNCH_START <= hour < LUNCH_END:
         return False, "Lunch break 1–2 PM"
     return True, "ok"
@@ -120,12 +136,12 @@ def next_available(doctor, date_obj):
 def root():
     return {"status": "running"}
 
-# ---------------- DASHBOARD PAGE ----------------
+# ---------------- DASHBOARD ----------------
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
-# ---------------- CHAT LOGGING ----------------
+# ---------------- CHAT ----------------
 sessions = {}
 
 @app.post("/chat")
@@ -181,11 +197,11 @@ async def book(request: Request):
         nxt = next_available(doctor, date_obj)
         return {
             "status": "unavailable",
-            "message": f"Next available slot {nxt}:00" if nxt else "No slots available"
+            "message": f"Next available {nxt}:00" if nxt else "No slots available"
         }
 
     cursor.execute(
-        "INSERT INTO bookings (name, doctor, date, time, status, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bookings VALUES (NULL, ?, ?, ?, ?, ?, ?)",
         (
             name,
             doctor,
@@ -199,7 +215,7 @@ async def book(request: Request):
 
     return {"status": "confirmed"}
 
-# ---------------- API: STATS ----------------
+# ---------------- API ----------------
 @app.get("/api/stats")
 def stats():
     cursor.execute("SELECT COUNT(*) FROM bookings")
@@ -215,7 +231,6 @@ def stats():
         "avg_call_duration_seconds": 60
     }
 
-# ---------------- API: BOOKINGS ----------------
 @app.get("/api/bookings")
 def get_bookings():
     cursor.execute("SELECT id, name, doctor, date, time, status FROM bookings ORDER BY id DESC")
@@ -235,7 +250,6 @@ def get_bookings():
         ]
     }
 
-# ---------------- API: CALL LOGS ----------------
 @app.get("/api/call-logs")
 def get_calls():
     cursor.execute("SELECT id, transcript, timestamp FROM calls ORDER BY timestamp DESC")
