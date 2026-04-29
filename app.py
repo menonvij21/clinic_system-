@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 import sqlite3
 from datetime import datetime, timedelta
+import re
 
 app = FastAPI()
 
@@ -15,151 +16,169 @@ CREATE TABLE IF NOT EXISTS bookings (
     doctor TEXT,
     date TEXT,
     time TEXT,
-    timestamp TEXT
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS calls (
-    id TEXT,
-    user_input TEXT,
-    agent_response TEXT,
+    status TEXT,
     timestamp TEXT
 )
 """)
 
 conn.commit()
 
-# ---------------- HELPERS ----------------
-def normalize_date(date_str):
-    if not date_str:
+# ---------------- CLINIC RULES ----------------
+CLINIC_START = 9
+CLINIC_END = 20
+LUNCH_START = 13
+LUNCH_END = 14
+
+# ---------------- DATE PARSER (HINDI + ENG) ----------------
+def normalize_date(text):
+    if not text:
         return None
 
-    s = date_str.lower().strip()
+    t = text.lower().strip()
+    today = datetime.now()
 
-    if "aaj" in s or "today" in s:
-        return datetime.now().strftime("%Y-%m-%d")
+    # Hindi + English keywords
+    if "aaj" in t or "today" in t:
+        return today
+    if "kal" in t or "tomorrow" in t:
+        return today + timedelta(days=1)
+    if "parso" in t:
+        return today + timedelta(days=2)
 
-    if "kal" in s or "tomorrow" in s:
-        return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    # "3 tarikh", "5 date"
+    m = re.search(r'(\d{1,2})\s*(tarikh|date)?', t)
+    if m:
+        day = int(m.group(1))
+        try:
+            return today.replace(day=day)
+        except:
+            pass
 
-    return s
+    # Try standard formats
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(t, fmt)
+        except:
+            pass
 
+    return None
 
-def normalize_time(time_str):
-    if not time_str:
+# ---------------- TIME PARSER (HINDI + ENG) ----------------
+def normalize_time(text):
+    if not text:
         return None
 
-    s = time_str.lower().strip().replace(".", "")
+    t = text.lower().strip().replace(".", "")
 
-    try:
-        return datetime.strptime(s, "%I %p").strftime("%H:%M")
-    except:
-        pass
+    # "2 baje", "2 pm", "2:30 pm"
+    m = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?', t)
+    if m:
+        h = int(m.group(1))
+        mnt = int(m.group(2)) if m.group(2) else 0
+        p = m.group(3)
 
-    try:
-        return datetime.strptime(s, "%I:%M %p").strftime("%H:%M")
-    except:
-        pass
+        if p in ["pm"] and h != 12:
+            h += 12
+        if p in ["am"] and h == 12:
+            h = 0
 
-    return time_str
+        return h
 
+    return None
+
+# ---------------- VALIDATION ----------------
+def validate_slot(date_obj, hour):
+    if date_obj.weekday() == 6:
+        return False, "Clinic is closed on Sundays."
+
+    if hour < CLINIC_START or hour >= CLINIC_END:
+        return False, "Clinic is open from 9 AM to 8 PM."
+
+    if LUNCH_START <= hour < LUNCH_END:
+        return False, "Doctor is unavailable during lunch (1 PM–2 PM)."
+
+    return True, "valid"
+
+# ---------------- CHECK AVAILABILITY ----------------
+def is_available(doctor, date_obj, hour):
+    cursor.execute(
+        "SELECT * FROM bookings WHERE doctor=? AND date=? AND time=?",
+        (doctor, date_obj.strftime("%Y-%m-%d"), f"{hour:02d}:00")
+    )
+    return cursor.fetchone() is None
+
+# ---------------- NEXT SLOT ----------------
+def next_available(doctor, date_obj):
+    for h in range(CLINIC_START, CLINIC_END):
+        if LUNCH_START <= h < LUNCH_END:
+            continue
+        if is_available(doctor, date_obj, h):
+            return h
+    return None
 
 # ---------------- ROOT ----------------
 @app.get("/")
 def root():
     return {"status": "running"}
 
-
-# ---------------- CHAT ----------------
-@app.post("/chat")
-async def chat(data: dict):
-    message = data.get("message", "")
-    call_id = data.get("call_id", "default")
-
-    cursor.execute(
-        "INSERT INTO calls (id, user_input, agent_response, timestamp) VALUES (?, ?, ?, ?)",
-        (call_id, message, "Got it.", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    )
-    conn.commit()
-
-    return {"response": "Got it."}
-
-
 # ---------------- BOOK ----------------
 @app.post("/book")
 async def book(request: Request):
     data = await request.json()
 
-    print("🔥 RAW DATA:", data)
+    print("RAW:", data)
 
-    if isinstance(data, dict):
-        if "args" in data:
-            data = data["args"]
-        elif "arguments" in data:
-            data = data["arguments"]
+    # Handle Retell formats
+    if "args" in data:
+        data = data["args"]
+    elif "arguments" in data:
+        data = data["arguments"]
 
     name = data.get("name")
     doctor = data.get("doctor")
-    date = normalize_date(data.get("date"))
-    time = normalize_time(data.get("time"))
+    raw_date = data.get("date")
+    raw_time = data.get("time")
 
-    print("✅ PARSED:", name, doctor, date, time)
+    date_obj = normalize_date(raw_date)
+    hour = normalize_time(raw_time)
 
-    if not all([name, doctor, date, time]):
-        return {"status": "error", "received": data}
+    print("PARSED:", name, doctor, date_obj, hour)
 
+    if not all([name, doctor, date_obj, hour is not None]):
+        return {"status": "error", "message": "Invalid input"}
+
+    # Validate
+    valid, msg = validate_slot(date_obj, hour)
+    if not valid:
+        return {"status": "error", "message": msg}
+
+    # Check availability
+    if not is_available(doctor, date_obj, hour):
+        nxt = next_available(doctor, date_obj)
+        if nxt:
+            return {
+                "status": "unavailable",
+                "message": f"Slot not available. Next available slot is {nxt}:00."
+            }
+        else:
+            return {"status": "unavailable", "message": "No slots available"}
+
+    # Save booking
     cursor.execute(
-        "SELECT * FROM bookings WHERE doctor=? AND date=? AND time=?",
-        (doctor, date, time)
-    )
-
-    if cursor.fetchone():
-        return {"status": "unavailable"}
-
-    cursor.execute(
-        "INSERT INTO bookings (name, doctor, date, time, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (name, doctor, date, time, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        "INSERT INTO bookings (name, doctor, date, time, status, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            name,
+            doctor,
+            date_obj.strftime("%Y-%m-%d"),
+            f"{hour:02d}:00",
+            "confirmed",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
     )
     conn.commit()
 
-    return {"status": "confirmed"}
-
-
-# ---------------- BOOKINGS ----------------
-@app.get("/bookings")
-def get_bookings():
-    cursor.execute("SELECT name, doctor, date, time, timestamp FROM bookings ORDER BY id DESC")
-    rows = cursor.fetchall()
-
     return {
-        "bookings": [
-            {
-                "name": r[0],
-                "doctor": r[1],
-                "date": r[2],
-                "time": r[3],
-                "timestamp": r[4]
-            }
-            for r in rows
-        ]
-    }
-
-
-# ---------------- CALL LOGS ----------------
-@app.get("/calls")
-def get_calls():
-    cursor.execute("SELECT id, user_input, agent_response, timestamp FROM calls ORDER BY timestamp DESC")
-    rows = cursor.fetchall()
-
-    return {
-        "calls": [
-            {
-                "id": r[0],
-                "user_input": r[1],
-                "agent_response": r[2],
-                "timestamp": r[3]
-            }
-            for r in rows
-        ]
+        "status": "confirmed",
+        "date": date_obj.strftime("%Y-%m-%d"),
+        "time": f"{hour:02d}:00"
     }
