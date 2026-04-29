@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 import sqlite3
 from datetime import datetime
 
@@ -8,6 +8,7 @@ app = FastAPI()
 conn = sqlite3.connect("clinic.db", check_same_thread=False)
 cursor = conn.cursor()
 
+# Create tables
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS bookings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +33,22 @@ CREATE TABLE IF NOT EXISTS calls (
 )
 """)
 
+# 🔥 AUTO MIGRATION (CRITICAL FIX)
+def safe_add_column(table, column, col_type):
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except:
+        pass
+
+# Fix bookings table
+safe_add_column("bookings", "status", "TEXT")
+safe_add_column("bookings", "timestamp", "TEXT")
+
+# Fix calls table
+safe_add_column("calls", "transcript", "TEXT")
+safe_add_column("calls", "duration_seconds", "INTEGER")
+safe_add_column("calls", "outcome", "TEXT")
+
 conn.commit()
 
 # ---------------- CHAT ----------------
@@ -46,10 +63,10 @@ async def chat(data: dict):
 
     response = "Got it."
 
-    # CLEAN TRANSCRIPT
+    # Clean transcript
     memory["history"] += f"\nUser: {message}\nAI: {response}"
 
-    # LIMIT SIZE
+    # Limit size
     if len(memory["history"]) > 1000:
         memory["history"] = memory["history"][-1000:]
 
@@ -145,12 +162,13 @@ def get_calls():
                 "call_started_at": r[2],
                 "duration_seconds": 60,
                 "outcome": "completed",
-                "transcript": r[1]
+                "transcript": r[1] if r[1] else ""
             }
             for r in rows
         ]
     }
 
+# ---------------- ROOT ----------------
 @app.get("/")
 def root():
     return {"status": "running"}
