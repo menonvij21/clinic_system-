@@ -8,7 +8,7 @@ app = FastAPI()
 conn = sqlite3.connect("clinic.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Create tables
+# Create tables (latest schema)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS bookings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS bookings (
     date TEXT,
     time TEXT,
     status TEXT,
-    timestamp TEXT
+    created_at TEXT
 )
 """)
 
@@ -29,31 +29,31 @@ CREATE TABLE IF NOT EXISTS calls (
     transcript TEXT,
     duration_seconds INTEGER,
     outcome TEXT,
-    timestamp TEXT
+    created_at TEXT
 )
 """)
 
-# 🔥 AUTO MIGRATION (CRITICAL FIX)
+# ---------------- AUTO MIGRATION ----------------
 def safe_add_column(table, column, col_type):
     try:
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
     except:
         pass
 
-# Fix bookings table
 safe_add_column("bookings", "status", "TEXT")
-safe_add_column("bookings", "timestamp", "TEXT")
+safe_add_column("bookings", "created_at", "TEXT")
 
-# Fix calls table
 safe_add_column("calls", "transcript", "TEXT")
 safe_add_column("calls", "duration_seconds", "INTEGER")
 safe_add_column("calls", "outcome", "TEXT")
+safe_add_column("calls", "created_at", "TEXT")
 
 conn.commit()
 
-# ---------------- CHAT ----------------
+# ---------------- MEMORY ----------------
 sessions = {}
 
+# ---------------- CHAT ----------------
 @app.post("/chat")
 async def chat(data: dict):
     message = data.get("message", "")
@@ -66,24 +66,25 @@ async def chat(data: dict):
     # Clean transcript
     memory["history"] += f"\nUser: {message}\nAI: {response}"
 
-    # Limit size
+    # Limit transcript size
     if len(memory["history"]) > 1000:
         memory["history"] = memory["history"][-1000:]
 
     transcript = memory["history"]
 
-    cursor.execute(
-        "INSERT INTO calls VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            call_id,
-            message,
-            response,
-            transcript,
-            60,
-            "completed",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
-    )
+    cursor.execute("""
+        INSERT INTO calls (id, user_input, agent_response, transcript, duration_seconds, outcome, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        call_id,
+        message,
+        response,
+        transcript,
+        60,
+        "completed",
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+
     conn.commit()
 
     return {"response": response}
@@ -99,17 +100,18 @@ async def book(data: dict):
     date = data.get("date")
     time = data.get("time")
 
-    cursor.execute(
-        "INSERT INTO bookings VALUES (NULL, ?, ?, ?, ?, ?, ?)",
-        (
-            name,
-            doctor,
-            date,
-            time,
-            "confirmed",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
-    )
+    cursor.execute("""
+        INSERT INTO bookings (name, doctor, date, time, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        name,
+        doctor,
+        date,
+        time,
+        "confirmed",
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+
     conn.commit()
 
     return {"status": "confirmed"}
@@ -118,21 +120,25 @@ async def book(data: dict):
 @app.get("/api/stats")
 def stats():
     cursor.execute("SELECT COUNT(*) FROM bookings")
-    bookings = cursor.fetchone()[0]
+    total_bookings = cursor.fetchone()[0]
 
     cursor.execute("SELECT COUNT(*) FROM calls")
-    calls = cursor.fetchone()[0]
+    total_calls = cursor.fetchone()[0]
 
     return {
-        "total_bookings": bookings,
-        "total_calls": calls,
-        "bookings_today": bookings
+        "total_bookings": total_bookings,
+        "total_calls": total_calls,
+        "bookings_today": total_bookings
     }
 
 # ---------------- API: BOOKINGS ----------------
 @app.get("/api/bookings")
 def get_bookings():
-    cursor.execute("SELECT id, name, doctor, date, time, status FROM bookings ORDER BY id DESC")
+    cursor.execute("""
+        SELECT id, name, doctor, date, time, status 
+        FROM bookings 
+        ORDER BY id DESC
+    """)
     rows = cursor.fetchall()
 
     return {
@@ -152,17 +158,21 @@ def get_bookings():
 # ---------------- API: CALL LOGS ----------------
 @app.get("/api/call-logs")
 def get_calls():
-    cursor.execute("SELECT id, transcript, timestamp FROM calls ORDER BY timestamp DESC")
+    cursor.execute("""
+        SELECT id, created_at, duration_seconds, outcome, transcript 
+        FROM calls 
+        ORDER BY created_at DESC
+    """)
     rows = cursor.fetchall()
 
     return {
         "call_logs": [
             {
                 "call_id": r[0],
-                "call_started_at": r[2],
-                "duration_seconds": 60,
-                "outcome": "completed",
-                "transcript": r[1] if r[1] else ""
+                "call_started_at": r[1],
+                "duration_seconds": r[2] if r[2] else 0,
+                "outcome": r[3] if r[3] else "completed",
+                "transcript": r[4] if r[4] else ""
             }
             for r in rows
         ]
