@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS calls (
 conn.commit()
 
 # ---------------- HELPERS ----------------
-def normalize_date(date_str: str):
+def normalize_date(date_str):
     if not date_str:
         return None
 
@@ -43,21 +43,14 @@ def normalize_date(date_str: str):
     if "kal" in s or "tomorrow" in s:
         return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # try parsing common formats
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
-        except:
-            pass
-
-    return s  # fallback
+    return s
 
 
-def normalize_time(time_str: str):
+def normalize_time(time_str):
     if not time_str:
         return None
 
-    s = time_str.strip().lower().replace(".", "")
+    s = time_str.lower().strip().replace(".", "")
 
     try:
         return datetime.strptime(s, "%I %p").strftime("%H:%M")
@@ -69,7 +62,7 @@ def normalize_time(time_str: str):
     except:
         pass
 
-    return time_str  # fallback
+    return time_str
 
 
 # ---------------- ROOT ----------------
@@ -78,39 +71,28 @@ def root():
     return {"status": "running"}
 
 
-# ---------------- CHAT (LOGGING) ----------------
-sessions = {}
-
-def think(message: str, memory: dict):
-    return "Got it."
-
+# ---------------- CHAT ----------------
 @app.post("/chat")
 async def chat(data: dict):
     message = data.get("message", "")
     call_id = data.get("call_id", "default")
 
-    if call_id not in sessions:
-        sessions[call_id] = {}
-
-    response = think(message, sessions[call_id])
-
     cursor.execute(
         "INSERT INTO calls (id, user_input, agent_response, timestamp) VALUES (?, ?, ?, ?)",
-        (call_id, message, response, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        (call_id, message, "Got it.", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     )
     conn.commit()
 
-    return {"response": response}
+    return {"response": "Got it."}
 
 
-# ---------------- BOOK APPOINTMENT ----------------
+# ---------------- BOOK ----------------
 @app.post("/book")
 async def book(request: Request):
     data = await request.json()
 
     print("🔥 RAW DATA:", data)
 
-    # Handle Retell formats
     if isinstance(data, dict):
         if "args" in data:
             data = data["args"]
@@ -125,25 +107,16 @@ async def book(request: Request):
     print("✅ PARSED:", name, doctor, date, time)
 
     if not all([name, doctor, date, time]):
-        return {
-            "status": "error",
-            "message": "Missing or invalid fields",
-            "received": data
-        }
+        return {"status": "error", "received": data}
 
-    # Check duplicate booking
     cursor.execute(
         "SELECT * FROM bookings WHERE doctor=? AND date=? AND time=?",
         (doctor, date, time)
     )
 
     if cursor.fetchone():
-        return {
-            "status": "unavailable",
-            "message": "Slot already booked"
-        }
+        return {"status": "unavailable"}
 
-    # Save booking
     cursor.execute(
         "INSERT INTO bookings (name, doctor, date, time, timestamp) VALUES (?, ?, ?, ?, ?)",
         (name, doctor, date, time, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -153,12 +126,10 @@ async def book(request: Request):
     return {"status": "confirmed"}
 
 
-# ---------------- GET BOOKINGS ----------------
+# ---------------- BOOKINGS ----------------
 @app.get("/bookings")
 def get_bookings():
-    cursor.execute(
-        "SELECT name, doctor, date, time, timestamp FROM bookings ORDER BY id DESC"
-    )
+    cursor.execute("SELECT name, doctor, date, time, timestamp FROM bookings ORDER BY id DESC")
     rows = cursor.fetchall()
 
     return {
@@ -175,12 +146,10 @@ def get_bookings():
     }
 
 
-# ---------------- GET CALL LOGS ----------------
+# ---------------- CALL LOGS ----------------
 @app.get("/calls")
 def get_calls():
-    cursor.execute(
-        "SELECT id, user_input, agent_response, timestamp FROM calls ORDER BY timestamp DESC"
-    )
+    cursor.execute("SELECT id, user_input, agent_response, timestamp FROM calls ORDER BY timestamp DESC")
     rows = cursor.fetchall()
 
     return {
@@ -192,7 +161,5 @@ def get_calls():
                 "timestamp": r[3]
             }
             for r in rows
-        ]
-    }
         ]
     }
