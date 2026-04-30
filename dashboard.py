@@ -501,4 +501,3 @@ st.rerun()
 | **Table structure** | Fixed HTML table rendering with proper thead/tbody |
 | **Backend mapping** | Kept exact field names: `call_id`, `call_started_at`, `duration_seconds`, `outcome`, `transcript` |
 
-This version is **clean, simple, and guaranteed to work** while still looking modern and professional! 🚀
