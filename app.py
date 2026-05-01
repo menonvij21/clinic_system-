@@ -1,8 +1,18 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 from datetime import datetime, date
 
 app = FastAPI()
+
+# ---------------- CORS ----------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("clinic.db", check_same_thread=False)
@@ -42,6 +52,8 @@ def safe_add_column(table, column, col_type):
     except:
         pass
 
+safe_add_column("bookings", "status", "TEXT")
+safe_add_column("bookings", "timestamp", "TEXT")
 safe_add_column("calls", "transcript", "TEXT")
 safe_add_column("calls", "duration_seconds", "INTEGER")
 safe_add_column("calls", "outcome", "TEXT")
@@ -89,6 +101,7 @@ async def chat(data: dict):
 @app.post("/book")
 async def book(data: dict):
 
+    # 🔥 Handle Retell format
     if "args" in data:
         data = data["args"]
 
@@ -98,25 +111,40 @@ async def book(data: dict):
     booking_time = data.get("time")
 
     if not all([name, doctor, booking_date, booking_time]):
-        return {"error": "Missing fields"}
+        return {
+            "status": "error",
+            "message": "Missing required fields"
+        }
 
-    # ❌ Prevent Sunday booking
+    # ✅ Validate date
     try:
         dt = datetime.strptime(booking_date, "%Y-%m-%d")
-        if dt.weekday() == 6:
-            return {"error": "Clinic closed on Sunday"}
     except:
-        return {"error": "Invalid date format"}
+        return {
+            "status": "error",
+            "message": "Invalid date format"
+        }
+
+    # ❌ No Sunday
+    if dt.weekday() == 6:
+        return {
+            "status": "closed",
+            "message": "Clinic is closed on Sunday"
+        }
 
     # ❌ Prevent double booking
     cursor.execute("""
-    SELECT * FROM bookings 
+    SELECT id FROM bookings 
     WHERE doctor=? AND date=? AND time=?
     """, (doctor, booking_date, booking_time))
 
     if cursor.fetchone():
-        return {"error": "Slot already booked"}
+        return {
+            "status": "unavailable",
+            "message": "This slot is already booked"
+        }
 
+    # ✅ Insert booking
     cursor.execute("""
     INSERT INTO bookings (name, doctor, date, time, status, timestamp)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -131,12 +159,14 @@ async def book(data: dict):
 
     conn.commit()
 
-    return {"status": "confirmed"}
+    return {
+        "status": "confirmed",
+        "message": f"Appointment booked with {doctor} on {booking_date} at {booking_time}"
+    }
 
 # ---------------- API: STATS ----------------
 @app.get("/api/stats")
 def stats():
-
     cursor.execute("SELECT COUNT(*) FROM bookings")
     total_bookings = cursor.fetchone()[0]
 
@@ -157,7 +187,6 @@ def stats():
 # ---------------- API: BOOKINGS ----------------
 @app.get("/api/bookings")
 def get_bookings():
-
     cursor.execute("""
     SELECT id, name, doctor, date, time, status
     FROM bookings
@@ -174,7 +203,7 @@ def get_bookings():
                 "doctor_name": r[2],
                 "appointment_date": r[3],
                 "appointment_time": r[4],
-                "status": r[5] or "confirmed"
+                "status": r[5] if r[5] else "confirmed"
             }
             for r in rows
         ]
@@ -183,7 +212,6 @@ def get_bookings():
 # ---------------- API: CALL LOGS ----------------
 @app.get("/api/call-logs")
 def get_calls():
-
     cursor.execute("""
     SELECT id, transcript, duration_seconds, outcome, timestamp
     FROM calls
@@ -197,9 +225,9 @@ def get_calls():
             {
                 "call_id": r[0],
                 "call_started_at": r[4],
-                "duration_seconds": r[2] or 60,
-                "outcome": r[3] or "completed",
-                "transcript": r[1] or ""
+                "duration_seconds": r[2] if r[2] else 60,
+                "outcome": r[3] if r[3] else "completed",
+                "transcript": r[1] if r[1] else ""
             }
             for r in rows
         ]
